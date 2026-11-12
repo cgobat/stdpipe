@@ -82,6 +82,33 @@ Example of using the code for solving the astrometry if not set in the header:
 .. autofunction:: stdpipe.astrometry.blind_match_objects
    :noindex:
 
+Solving an image with StellarSolver
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:func:`stdpipe.astrometry.blind_match_stellarsolver` accepts an image array and
+runs `StellarSolver <https://github.com/rlancaste/stellarsolver>`_'s built-in source
+extraction and solver. It requires ``stellarsolver-cli`` on PATH (or ``_exe``)
+and local Astrometry.Net index files; no separate source extraction is needed.
+
+.. code-block:: python
+
+   wcs = astrometry.blind_match_stellarsolver(
+       image, index_dir="/data/astrometry",
+       center_ra=ra0, center_dec=dec0, radius=1.0,
+       scale_lower=0.3, scale_upper=3.0, verbose=True,
+   )
+
+The scale bounds default to arcseconds per pixel. Omit the center and scale
+hints for a blind search. Use ``get_header=True`` to return the solved FITS
+header; failures return ``None``. Additional CLI options, such as ``depth``,
+``parity``, ``cpulimit``, and ``built-in-profile``, can be passed in ``extra``.
+
+The current CLI's FITS export contains a TAN solution without SIP distortion
+coefficients. It can serve as the initial WCS for the refinement routines below.
+
+.. autofunction:: stdpipe.astrometry.blind_match_stellarsolver
+   :noindex:
+
 Astrometric refinement
 ----------------------
 

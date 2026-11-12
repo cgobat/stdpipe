@@ -1,4 +1,5 @@
 import os, tempfile, shutil, shlex, re, warnings
+import subprocess
 import numpy as np
 
 from astropy.wcs import WCS
@@ -461,6 +462,161 @@ def blind_match_objects(
         shutil.rmtree(workdir)
 
     return wcs
+
+
+def blind_match_stellarsolver(
+    image,
+    get_header=False,
+    center_ra=None,
+    center_dec=None,
+    radius=None,
+    scale_lower=None,
+    scale_upper=None,
+    scale_units="arcsecperpix",
+    index_dir=None,
+    config=None,
+    extra=None,
+    timeout=600,
+    _workdir=None,
+    _tmpdir=None,
+    _exe=None,
+    verbose=False,
+):
+    """Solve an image using StellarSolver's own source extraction and local solver.
+
+    Requires ``stellarsolver-cli`` and local Astrometry.Net index files.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        Two-dimensional image. It is written to a temporary FITS file as float32.
+    get_header : bool, optional
+        Return the solved FITS header instead of a WCS object.
+    center_ra, center_dec : float, optional
+        Approximate field center in degrees. Both must be supplied together.
+    radius : float, optional
+        Search radius in degrees around the supplied field center.
+    scale_lower, scale_upper : float, optional
+        Image scale bounds. Both must be supplied together.
+    scale_units : str, optional
+        Units of the scale bounds: ``"arcsecperpix"`` (default),
+        ``"arcminwidth"``, ``"degwidth"``, or ``"focalmm"``.
+    index_dir : str, optional
+        Directory containing index files. Overrides ``config``. If neither is
+        supplied, StellarSolver uses its default index directory.
+    config : str, optional
+        Astrometry.Net configuration file. The CLI reads only its ``add_path``
+        directive (the last one if there are several).
+    extra : dict, optional
+        Additional CLI options without leading dashes, e.g.
+        ``{"depth": 500, "parity": "neg", "built-in-profile": "4-SmallScaleSolving"}``.
+        These override the corresponding arguments above. ``save-fits`` is
+        reserved for the wrapper's output file.
+    timeout : float or None, optional
+        Wall-clock timeout in seconds, default 600. None disables the timeout.
+        The CLI's solver time limit can also be set through ``extra["cpulimit"]``.
+    _workdir : str, optional
+        Keep input and output FITS files in this directory for inspection.
+        ``image.fits`` and ``solved.fits`` are overwritten on each call.
+    _tmpdir : str, optional
+        Parent directory for automatically created temporary directories.
+    _exe : str, optional
+        Executable name or path. Defaults to ``stellarsolver-cli`` on PATH.
+    verbose : bool or callable, optional
+        Show diagnostic messages, optionally through a print-like callable.
+
+    Returns
+    -------
+    astropy.wcs.WCS or astropy.io.fits.Header or None
+        Astrometric solution, or None if the executable is unavailable, solving
+        fails, times out, or produces no celestial WCS.
+
+    Notes
+    -----
+    The current CLI exports a TAN WCS using the solution's center, scale,
+    rotation, and parity, without SIP distortion coefficients. Use astrometric
+    refinement afterwards if a distortion solution is needed.
+    """
+    log = (verbose if callable(verbose) else print) if verbose else lambda *args, **kwargs: None
+
+    image = np.asarray(image)
+    if image.ndim != 2:
+        raise ValueError("image must be a two-dimensional array")
+    if (center_ra is None) != (center_dec is None):
+        raise ValueError("center_ra and center_dec must be supplied together")
+    if (scale_lower is None) != (scale_upper is None):
+        raise ValueError("scale_lower and scale_upper must be supplied together")
+
+    binname = shutil.which(_exe if _exe is not None else "stellarsolver-cli")
+    if binname is None:
+        log("Can't find StellarSolver CLI binary")
+        return None
+
+    workdir = (
+        os.path.abspath(_workdir) if _workdir is not None
+        else tempfile.mkdtemp(prefix="stellarsolver", dir=_tmpdir)
+    )
+    try:
+        os.makedirs(workdir, exist_ok=True)
+        imagename = os.path.join(workdir, "image.fits")
+        solvedname = os.path.join(workdir, "solved.fits")
+        fits.writeto(imagename, image.astype(np.float32), overwrite=True)
+        # A retained work directory may contain a solution from an earlier call.
+        if os.path.exists(solvedname):
+            os.remove(solvedname)
+
+        opts = {
+            "ra": center_ra,
+            "dec": center_dec,
+            "degrees": radius,
+            "scale-low": scale_lower,
+            "scale-high": scale_upper,
+            "scale-units": scale_units,
+            "index-files": index_dir,
+            "config": config,
+        }
+        if extra:
+            opts.update(extra)
+        opts["save-fits"] = solvedname
+
+        command = [binname]
+        for key, value in opts.items():
+            if value is True:
+                command.append("--" + key)
+            elif value is not None and value is not False:
+                command.append("--%s=%s" % (key, value))
+        command.append(imagename)
+        log("Running StellarSolver:")
+        log(shlex.join(command))
+
+        try:
+            res = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log("Error running StellarSolver:", exc)
+            return None
+        if res.stdout:
+            log(res.stdout.rstrip())
+        if res.stderr:
+            log(res.stderr.rstrip())
+        if res.returncode != 0 or not os.path.isfile(solvedname):
+            log("StellarSolver failed, exit code", res.returncode)
+            return None
+
+        try:
+            header = fits.getheader(solvedname)
+            wcs = WCS(header)
+        except (OSError, ValueError) as exc:
+            log("Cannot read StellarSolver WCS:", exc)
+            return None
+        if not wcs.is_celestial:
+            log("StellarSolver produced no celestial WCS")
+            return None
+
+        log("StellarSolver solving succeeded")
+        return header if get_header else wcs
+    finally:
+        if _workdir is None:
+            shutil.rmtree(workdir)
 
 
 def blind_match_astrometrynet(
